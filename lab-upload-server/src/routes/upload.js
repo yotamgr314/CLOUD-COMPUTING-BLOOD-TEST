@@ -1,20 +1,21 @@
 const express = require("express");
 const multer = require("multer");
+const ipAllowlist = require("../middleware/ipAllowlist");
+const jwtAuth = require("../middleware/jwtAuth");
 
 const router = express.Router();
-
 const upload = multer({ storage: multer.memoryStorage() });
 
-router.post("/", upload.single("file"), (req, res) => {
+router.post("/", ipAllowlist, jwtAuth, upload.single("file"), (req, res) => {
   if (!req.file) {
-    return res.status(400).json({
-      status: "error",
-      message: "No file received",
-    });
+    return res
+      .status(400)
+      .json({ status: "error", message: "No file received" });
   }
 
   return res.status(200).json({
     status: "received",
+    labId: req.lab.lab_id,
     fileName: req.file.originalname,
     fileSize: req.file.size,
     mimeType: req.file.mimetype,
