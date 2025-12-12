@@ -1,5 +1,4 @@
 function normalizeIp(ip) {
-  // Express לפעמים מחזיר IPv6-mapped IPv4 בפורמט ::ffff:1.2.3.4
   if (typeof ip === "string" && ip.startsWith("::ffff:")) {
     return ip.replace("::ffff:", "");
   }
@@ -7,10 +6,8 @@ function normalizeIp(ip) {
 }
 
 function getClientIp(req) {
-  // אם יש reverse proxy / load balancer, ה-IP יכול להגיע ב-x-forwarded-for
   const xff = req.headers["x-forwarded-for"];
   if (xff && typeof xff === "string") {
-    // לוקחים את הראשון (המקורי)
     return xff.split(",")[0].trim();
   }
   return req.ip;

@@ -30,7 +30,7 @@ function jwtAuth(req, res, next) {
       });
     }
 
-    req.lab = payload; // נשמור להמשך
+    req.lab = payload;
     next();
   } catch {
     return res.status(401).json({
