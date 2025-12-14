@@ -4,6 +4,7 @@ const jwtAuth = require("../middleware/jwtAuth");
 const ipAllowlist = require("../middleware/ipAllowlist");
 const { validateFile } = require("../validation/fileValidation");
 const { writeAudit } = require("../utils/auditLogger");
+const { sendSecurityAlertEmail } = require("../utils/emailNotifier");
 
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 
@@ -21,8 +22,7 @@ function isoForKey(d = new Date()) {
 }
 
 function normalizeIp(ip) {
-  if (typeof ip === "string" && ip.startsWith("::ffff:"))
-    return ip.replace("::ffff:", "");
+  if (typeof ip === "string" && ip.startsWith("::ffff:")) return ip.replace("::ffff:", "");
   return ip;
 }
 
@@ -103,20 +103,17 @@ router.post(
           labId: String(labId),
           userId: String(userId),
           clientIp,
-          reason:
-            "Server misconfiguration: BUCKET_READY/BUCKET_INVALID missing",
+          reason: "Server misconfiguration: BUCKET_READY/BUCKET_INVALID missing",
           path: req.originalUrl,
           method: req.method,
         });
 
         return res.status(500).json({
           status: "error",
-          message:
-            "Server misconfiguration: BUCKET_READY/BUCKET_INVALID missing",
+          message: "Server misconfiguration: BUCKET_READY/BUCKET_INVALID missing",
         });
       }
 
-      // validateFile יודע להחזיר invalid גם כשאין file
       const result = validateFile(req.file);
       const isValid = result.ok === true;
 
@@ -149,9 +146,7 @@ router.post(
       }
 
       const folder = isValid ? "valid" : "invalid";
-      const bucket = isValid
-        ? process.env.BUCKET_READY
-        : process.env.BUCKET_INVALID;
+      const bucket = isValid ? process.env.BUCKET_READY : process.env.BUCKET_INVALID;
 
       const original = safeName(req.file.originalname || "unknown");
       const objectKey = `lab/${labId}/user/${userId}/${folder}/${isoForKey()}-${original}`;
@@ -171,7 +166,7 @@ router.post(
         metadata,
       });
 
-      // ✅ Security Notification (רק על invalid) -> אותו INVALID bucket תחת alerts/
+      // ✅ Alert JSON ל-S3 (רק invalid)
       let alertKey = null;
       if (!isValid) {
         alertKey = await writeAlertToS3({
@@ -183,9 +178,37 @@ router.post(
           reason: result.reason,
           invalidObjectKey: objectKey,
         });
+
+        // ✅ Security email (רק invalid)
+        // לא מפילים את ה-upload אם המייל נכשל – רק log audit
+        try {
+          await sendSecurityAlertEmail({
+            labId: String(labId),
+            userId: String(userId),
+            clientIp,
+            fileName: req.file.originalname,
+            fileSize: req.file.size,
+            mimeType: req.file.mimetype,
+            reason: result.reason || "invalid",
+            bucket: process.env.BUCKET_INVALID,
+            invalidObjectKey: objectKey,
+            alertKey,
+            etag: putRes?.ETag || null,
+          });
+        } catch (mailErr) {
+          writeAudit({
+            action: "warning",
+            stage: "emailNotifier",
+            labId: String(labId),
+            userId: String(userId),
+            clientIp,
+            reason: `Failed to send security email: ${mailErr?.message || "unknown"}`,
+            path: req.originalUrl,
+            method: req.method,
+          });
+        }
       }
 
-      // ✅ Audit log (גם success וגם reject)
       writeAudit({
         action: isValid ? "stored" : "rejected",
         stage: "upload",
@@ -214,7 +237,7 @@ router.post(
         key: objectKey,
         reason: isValid ? null : result.reason,
         etag: putRes?.ETag || null,
-        alertKey, // null אם valid
+        alertKey,
       });
     } catch (e) {
       writeAudit({
