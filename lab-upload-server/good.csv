@@ -1,0 +1,2 @@
+reportId,patientId,timestamp,testCode,value,unit
+r1,p123,2025-12-14T11:00:00Z,HGB,13.4,g/dL

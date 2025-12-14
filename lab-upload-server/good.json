@@ -1,1 +1,9 @@
-{"reportId":"r1","value":123}
+{
+  "reportId": "r1",
+  "patientId": "p123",
+  "timestamp": "2025-12-14T11:00:00Z",
+  "tests": [
+    { "testCode": "HGB", "value": 13.4, "unit": "g/dL" },
+    { "testCode": "WBC", "value": 7.1, "unit": "10^3/uL", "flag": "N" }
+  ]
+}
