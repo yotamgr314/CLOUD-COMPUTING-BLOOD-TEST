@@ -10,28 +10,72 @@ const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
 const s3 = new S3Client({ region: process.env.AWS_REGION });
-console.log("UPLOAD ROUTE VERSION = S3_ROUTING");
 
 function safeName(name = "file") {
-  // מנקה תווים בעייתיים ל-key
   return name.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
 function isoForKey(d = new Date()) {
-  // ":" בעייתי לפעמים בקריאה/כלים, אז מחליפים ל "-"
   return d.toISOString().replace(/:/g, "-");
 }
 
+function getClientIp(req) {
+  const xff = req.headers["x-forwarded-for"];
+  if (xff && typeof xff === "string") return xff.split(",")[0].trim();
+  return req.ip;
+}
+
 async function putToS3({ bucket, key, body, contentType, metadata }) {
-  await s3.send(
+  return s3.send(
     new PutObjectCommand({
       Bucket: bucket,
       Key: key,
       Body: body,
       ContentType: contentType,
-      Metadata: metadata, // keys+values must be strings
+      Metadata: metadata,
     })
   );
+}
+
+async function writeAlertToS3({
+  bucketInvalid,
+  labId,
+  userId,
+  clientIp,
+  file,
+  reason,
+  invalidObjectKey,
+}) {
+  if (!bucketInvalid) return;
+
+  const alert = {
+    type: "invalid_file",
+    time: new Date().toISOString(),
+    labId,
+    userId,
+    clientIp,
+    fileName: file?.originalname || null,
+    fileSize: file?.size ?? null,
+    mimeType: file?.mimetype || null,
+    reason: reason || "invalid",
+    invalidObjectKey: invalidObjectKey || null,
+  };
+
+  const alertKey = `alerts/${isoForKey()}-lab${labId}-user${userId}.json`;
+
+  await putToS3({
+    bucket: bucketInvalid,
+    key: alertKey,
+    body: Buffer.from(JSON.stringify(alert, null, 2), "utf8"),
+    contentType: "application/json",
+    metadata: {
+      type: "invalid_file",
+      lab_id: String(labId),
+      user_id: String(userId),
+    },
+  });
+
+  return alertKey;
 }
 
 router.post(
@@ -43,16 +87,17 @@ router.post(
     try {
       const labId = req.auth.lab_id;
       const userId = req.auth.user_id;
+      const clientIp = getClientIp(req);
 
       const result = validateFile(req.file);
-
       const isValid = result.ok === true;
+
       const folder = isValid ? "valid" : "invalid";
       const bucket = isValid
         ? process.env.BUCKET_READY
         : process.env.BUCKET_INVALID;
 
-      if (!bucket) {
+      if (!process.env.BUCKET_READY || !process.env.BUCKET_INVALID) {
         return res.status(500).json({
           status: "error",
           message:
@@ -60,22 +105,9 @@ router.post(
         });
       }
 
-      const original = safeName(req.file?.originalname || "unknown");
-      const key = `lab/${labId}/user/${userId}/${folder}/${isoForKey()}-${original}`;
-
-      // metadata values must be strings; keep small
-      const metadata = {
-        lab_id: String(labId),
-        user_id: String(userId),
-        validation: folder,
-      };
-
-      if (!isValid) {
-        metadata.reason = String(result.reason || "invalid");
-      }
-
-      // אם אין בכלל קובץ, validateFile כבר מחזיר invalid, אבל פה צריך להגן
       if (!req.file) {
+        // אין טעם לכתוב ל-S3 אם אין בכלל קובץ
+        // (אפשר גם להחליט שכן כ-alert בלבד, אבל נשאיר פשוט)
         return res.status(400).json({
           status: "invalid",
           labId,
@@ -84,13 +116,37 @@ router.post(
         });
       }
 
-      await putToS3({
+      const original = safeName(req.file.originalname);
+      const objectKey = `lab/${labId}/user/${userId}/${folder}/${isoForKey()}-${original}`;
+
+      const metadata = {
+        lab_id: String(labId),
+        user_id: String(userId),
+        validation: folder,
+      };
+      if (!isValid) metadata.reason = String(result.reason || "invalid");
+
+      const putRes = await putToS3({
         bucket,
-        key,
+        key: objectKey,
         body: req.file.buffer,
         contentType: req.file.mimetype,
         metadata,
       });
+
+      // ✅ Security Notification (רק על invalid)
+      let alertKey = null;
+      if (!isValid) {
+        alertKey = await writeAlertToS3({
+          bucketInvalid: process.env.BUCKET_INVALID,
+          labId,
+          userId,
+          clientIp,
+          file: req.file,
+          reason: result.reason,
+          invalidObjectKey: objectKey,
+        });
+      }
 
       return res.status(isValid ? 200 : 400).json({
         status: isValid ? "stored" : "rejected",
@@ -98,8 +154,10 @@ router.post(
         userId,
         valid: isValid,
         bucket,
-        key,
+        key: objectKey,
         reason: isValid ? null : result.reason,
+        etag: putRes?.ETag || null,
+        alertKey, // null אם valid
       });
     } catch (e) {
       return res.status(500).json({
