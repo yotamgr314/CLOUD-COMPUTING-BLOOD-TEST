@@ -3,6 +3,7 @@ const multer = require("multer");
 const jwtAuth = require("../middleware/jwtAuth");
 const ipAllowlist = require("../middleware/ipAllowlist");
 const { validateFile } = require("../validation/fileValidation");
+const { writeAudit } = require("../utils/auditLogger");
 
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 
@@ -19,10 +20,16 @@ function isoForKey(d = new Date()) {
   return d.toISOString().replace(/:/g, "-");
 }
 
+function normalizeIp(ip) {
+  if (typeof ip === "string" && ip.startsWith("::ffff:"))
+    return ip.replace("::ffff:", "");
+  return ip;
+}
+
 function getClientIp(req) {
   const xff = req.headers["x-forwarded-for"];
   if (xff && typeof xff === "string") return xff.split(",")[0].trim();
-  return req.ip;
+  return normalizeIp(req.ip);
 }
 
 async function putToS3({ bucket, key, body, contentType, metadata }) {
@@ -46,7 +53,7 @@ async function writeAlertToS3({
   reason,
   invalidObjectKey,
 }) {
-  if (!bucketInvalid) return;
+  if (!bucketInvalid) return null;
 
   const alert = {
     type: "invalid_file",
@@ -84,20 +91,24 @@ router.post(
   ipAllowlist,
   upload.single("file"),
   async (req, res) => {
+    const labId = req.auth?.lab_id;
+    const userId = req.auth?.user_id;
+    const clientIp = getClientIp(req);
+
     try {
-      const labId = req.auth.lab_id;
-      const userId = req.auth.user_id;
-      const clientIp = getClientIp(req);
-
-      const result = validateFile(req.file);
-      const isValid = result.ok === true;
-
-      const folder = isValid ? "valid" : "invalid";
-      const bucket = isValid
-        ? process.env.BUCKET_READY
-        : process.env.BUCKET_INVALID;
-
       if (!process.env.BUCKET_READY || !process.env.BUCKET_INVALID) {
+        writeAudit({
+          action: "error",
+          stage: "upload",
+          labId: String(labId),
+          userId: String(userId),
+          clientIp,
+          reason:
+            "Server misconfiguration: BUCKET_READY/BUCKET_INVALID missing",
+          path: req.originalUrl,
+          method: req.method,
+        });
+
         return res.status(500).json({
           status: "error",
           message:
@@ -105,9 +116,30 @@ router.post(
         });
       }
 
+      // validateFile יודע להחזיר invalid גם כשאין file
+      const result = validateFile(req.file);
+      const isValid = result.ok === true;
+
       if (!req.file) {
-        // אין טעם לכתוב ל-S3 אם אין בכלל קובץ
-        // (אפשר גם להחליט שכן כ-alert בלבד, אבל נשאיר פשוט)
+        writeAudit({
+          action: "invalid",
+          stage: "upload",
+          labId: String(labId),
+          userId: String(userId),
+          clientIp,
+          fileName: null,
+          fileSize: null,
+          mimeType: null,
+          valid: false,
+          bucket: null,
+          key: null,
+          etag: null,
+          alertKey: null,
+          reason: result.reason || "No file received",
+          path: req.originalUrl,
+          method: req.method,
+        });
+
         return res.status(400).json({
           status: "invalid",
           labId,
@@ -116,7 +148,12 @@ router.post(
         });
       }
 
-      const original = safeName(req.file.originalname);
+      const folder = isValid ? "valid" : "invalid";
+      const bucket = isValid
+        ? process.env.BUCKET_READY
+        : process.env.BUCKET_INVALID;
+
+      const original = safeName(req.file.originalname || "unknown");
       const objectKey = `lab/${labId}/user/${userId}/${folder}/${isoForKey()}-${original}`;
 
       const metadata = {
@@ -134,7 +171,7 @@ router.post(
         metadata,
       });
 
-      // ✅ Security Notification (רק על invalid)
+      // ✅ Security Notification (רק על invalid) -> אותו INVALID bucket תחת alerts/
       let alertKey = null;
       if (!isValid) {
         alertKey = await writeAlertToS3({
@@ -148,6 +185,26 @@ router.post(
         });
       }
 
+      // ✅ Audit log (גם success וגם reject)
+      writeAudit({
+        action: isValid ? "stored" : "rejected",
+        stage: "upload",
+        labId: String(labId),
+        userId: String(userId),
+        clientIp,
+        fileName: req.file.originalname,
+        fileSize: req.file.size,
+        mimeType: req.file.mimetype,
+        valid: isValid,
+        bucket,
+        key: objectKey,
+        etag: putRes?.ETag || null,
+        alertKey: alertKey || null,
+        reason: isValid ? null : result.reason || "invalid",
+        path: req.originalUrl,
+        method: req.method,
+      });
+
       return res.status(isValid ? 200 : 400).json({
         status: isValid ? "stored" : "rejected",
         labId,
@@ -160,6 +217,17 @@ router.post(
         alertKey, // null אם valid
       });
     } catch (e) {
+      writeAudit({
+        action: "error",
+        stage: "upload",
+        labId: String(labId),
+        userId: String(userId),
+        clientIp,
+        reason: e?.message || "Server error",
+        path: req.originalUrl,
+        method: req.method,
+      });
+
       return res.status(500).json({
         status: "error",
         message: e?.message || "Server error",

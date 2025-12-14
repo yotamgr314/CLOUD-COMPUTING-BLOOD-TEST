@@ -1,19 +1,223 @@
 <!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Upload file</title>
-</head>
-<body>
-  <h1>Upload file to server</h1>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lab Upload</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 24px;
+        max-width: 760px;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      input,
+      button,
+      select {
+        padding: 10px;
+        font-size: 14px;
+      }
+      button {
+        cursor: pointer;
+      }
+      .card {
+        border: 1px solid #ddd;
+        border-radius: 10px;
+        padding: 16px;
+        margin: 16px 0;
+      }
+      .muted {
+        color: #666;
+        font-size: 13px;
+      }
+      pre {
+        background: #0b1020;
+        color: #e6e6e6;
+        padding: 12px;
+        border-radius: 8px;
+        overflow: auto;
+      }
+      .ok {
+        color: #0a7a2f;
+        font-weight: 600;
+      }
+      .bad {
+        color: #b00020;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Lab Upload Server</h2>
+    <p class="muted">Login → get token → upload file to <code>/upload</code></p>
 
-  <form
-    action="/upload"
-    method="post"
-    enctype="multipart/form-data"
-  >
-    <input type="file" name="file" required />
-    <button type="submit">Upload</button>
-  </form>
-</body>
+    <div class="card">
+      <h3>1) Login</h3>
+      <div class="row">
+        <input id="labId" placeholder="lab_id (e.g. 003)" />
+        <input id="userId" placeholder="user_id (e.g. 3001)" />
+        <button id="loginBtn">Login (Get JWT)</button>
+        <button id="logoutBtn" type="button">Logout</button>
+      </div>
+      <p class="muted">
+        Token status: <span id="tokenStatus">not logged in</span>
+      </p>
+      <pre id="tokenBox" style="display: none"></pre>
+    </div>
+
+    <div class="card">
+      <h3>2) Upload</h3>
+
+      <div class="row">
+        <input id="fileInput" type="file" />
+        <select id="forceMime">
+          <option value="">(use browser mime)</option>
+          <option value="application/json">application/json</option>
+          <option value="text/csv">text/csv</option>
+        </select>
+        <button id="uploadBtn">Upload</button>
+      </div>
+
+      <p class="muted">
+        Your backend allows only <code>application/json</code> and
+        <code>text/csv</code>.
+      </p>
+
+      <div id="result"></div>
+      <pre id="raw"></pre>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+
+      const tokenKey = "lab_upload_token";
+      const tokenBox = $("tokenBox");
+      const tokenStatus = $("tokenStatus");
+      const result = $("result");
+      const raw = $("raw");
+
+      function getToken() {
+        return localStorage.getItem(tokenKey) || "";
+      }
+      function setToken(t) {
+        if (t) localStorage.setItem(tokenKey, t);
+        else localStorage.removeItem(tokenKey);
+        renderToken();
+      }
+      function renderToken() {
+        const t = getToken();
+        if (!t) {
+          tokenStatus.textContent = "not logged in";
+          tokenStatus.className = "bad";
+          tokenBox.style.display = "none";
+          tokenBox.textContent = "";
+          return;
+        }
+        tokenStatus.textContent = "logged in (token saved)";
+        tokenStatus.className = "ok";
+        tokenBox.style.display = "block";
+        tokenBox.textContent = t;
+      }
+
+      async function login() {
+        const labId = $("labId").value.trim();
+        const userId = $("userId").value.trim();
+
+        result.innerHTML = "";
+        raw.textContent = "";
+
+        const res = await fetch("/auth/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lab_id: labId, user_id: userId }),
+        });
+
+        const text = await res.text();
+        raw.textContent = text;
+
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = null;
+        }
+
+        if (!res.ok) {
+          result.innerHTML = `<p class="bad">Login failed (HTTP ${res.status})</p>`;
+          return;
+        }
+
+        if (!data?.token) {
+          result.innerHTML = `<p class="bad">No token returned</p>`;
+          return;
+        }
+
+        setToken(data.token);
+        result.innerHTML = `<p class="ok">Logged in. Token stored.</p>`;
+      }
+
+      async function uploadFile() {
+        const t = getToken();
+        if (!t) {
+          result.innerHTML = `<p class="bad">You must login first.</p>`;
+          return;
+        }
+
+        const file = $("fileInput").files[0];
+        if (!file) {
+          result.innerHTML = `<p class="bad">Choose a file first.</p>`;
+          return;
+        }
+
+        result.innerHTML = "";
+        raw.textContent = "";
+
+        const form = new FormData();
+
+        // Optional: force a mimetype (useful for curl-like testing)
+        const forced = $("forceMime").value;
+        if (forced) {
+          form.append("file", file, file.name); // browser will still send actual; backend uses multer mimetype
+          // note: browsers don't let us truly set multipart part Content-Type reliably for each part
+          // your validator should rely on file extension/content too if needed.
+        } else {
+          form.append("file", file);
+        }
+
+        const res = await fetch("/upload", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${t}` },
+          body: form,
+        });
+
+        const text = await res.text();
+        raw.textContent = text;
+
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = null;
+        }
+
+        if (!res.ok) {
+          result.innerHTML = `<p class="bad">Upload rejected (HTTP ${res.status})</p>`;
+          return;
+        }
+
+        result.innerHTML = `<p class="ok">Upload success.</p>`;
+      }
+
+      $("loginBtn").addEventListener("click", login);
+      $("logoutBtn").addEventListener("click", () => setToken(""));
+      $("uploadBtn").addEventListener("click", uploadFile);
+
+      renderToken();
+    </script>
+  </body>
 </html>

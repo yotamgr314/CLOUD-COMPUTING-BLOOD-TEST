@@ -1,10 +1,26 @@
 const jwt = require("jsonwebtoken");
+const { writeAudit } = require("../utils/auditLogger");
+
+function getClientIp(req) {
+  const xff = req.headers["x-forwarded-for"];
+  if (xff && typeof xff === "string") return xff.split(",")[0].trim();
+  return req.ip;
+}
 
 function jwtAuth(req, res, next) {
   const authHeader = req.headers.authorization || "";
   const [scheme, token] = authHeader.split(" ");
 
   if (scheme !== "Bearer" || !token) {
+    writeAudit({
+      action: "unauthorized",
+      stage: "jwtAuth",
+      clientIp: getClientIp(req),
+      reason: "Missing or invalid Authorization header",
+      path: req.originalUrl,
+      method: req.method,
+    });
+
     return res.status(401).json({
       status: "unauthorized",
       message:
@@ -23,25 +39,34 @@ function jwtAuth(req, res, next) {
   try {
     const payload = jwt.verify(token, secret);
 
-    // Require BOTH lab_id and user_id in the JWT payload
     if (!payload || !payload.lab_id || !payload.user_id) {
+      writeAudit({
+        action: "unauthorized",
+        stage: "jwtAuth",
+        clientIp: getClientIp(req),
+        reason: "Token valid but missing lab_id or user_id",
+        path: req.originalUrl,
+        method: req.method,
+      });
+
       return res.status(401).json({
         status: "unauthorized",
         message: "Token valid but missing lab_id or user_id",
       });
     }
 
-    // Keep only what we need for downstream middlewares (ipAllowlist, logs, etc.)
-    req.auth = {
-      lab_id: String(payload.lab_id),
-      user_id: String(payload.user_id),
-    };
-
-    // (Optional) if you still want full payload for debugging, uncomment:
-    // req.jwtPayload = payload;
-
+    req.auth = payload;
     return next();
   } catch {
+    writeAudit({
+      action: "unauthorized",
+      stage: "jwtAuth",
+      clientIp: getClientIp(req),
+      reason: "Invalid or expired token",
+      path: req.originalUrl,
+      method: req.method,
+    });
+
     return res.status(401).json({
       status: "unauthorized",
       message: "Invalid or expired token",
