@@ -1,3 +1,5 @@
+const { findUserRecord } = require("../database/db");
+
 function normalizeIp(ip) {
   if (typeof ip === "string" && ip.startsWith("::ffff:")) {
     return ip.replace("::ffff:", "");
@@ -14,25 +16,31 @@ function getClientIp(req) {
 }
 
 function ipAllowlist(req, res, next) {
-  const raw = process.env.ALLOWED_IPS || "";
-  const allowed = raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-
   const clientIp = normalizeIp(getClientIp(req));
 
-  if (allowed.length === 0) {
+  // חייב להיות אחרי jwtAuth
+  if (!req.auth?.lab_id || !req.auth?.user_id) {
     return res.status(500).json({
       status: "error",
-      message: "Server misconfiguration: ALLOWED_IPS is empty",
+      message:
+        "Server misconfiguration: auth context missing (jwtAuth must run before ipAllowlist)",
     });
   }
 
-  if (!allowed.includes(clientIp)) {
+  const rec = findUserRecord(req.auth.lab_id, req.auth.user_id);
+  if (!rec) {
+    return res.status(401).json({
+      status: "unauthorized",
+      message: "Unknown lab_id/user_id pair",
+    });
+  }
+
+  const allowedIps = (rec.user.ip_whitelist || []).map(normalizeIp);
+
+  if (!allowedIps.includes(clientIp)) {
     return res.status(403).json({
       status: "forbidden",
-      message: "IP not allowed",
+      message: "IP not allowed for this user",
       clientIp,
     });
   }
